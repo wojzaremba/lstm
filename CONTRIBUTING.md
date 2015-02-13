@@ -60,5 +60,5 @@ supported [extensions](http://luajit.org/extensions.html);
 [FFI](http://luajit.org/ext_ffi.html) is okay.
 
 ## License
-By contributing to FBLUA, you agree that your contributions will be licensed
+By contributing to LSTM, you agree that your contributions will be licensed
 under its Apache 2.
