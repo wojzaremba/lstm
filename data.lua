@@ -1,3 +1,11 @@
+--
+----  Copyright (c) 2014, Facebook, Inc.
+----  All rights reserved.
+----
+----  This source code is licensed under the Apache 2 license found in the
+----  LICENSE file in the root directory of this source tree. 
+----
+
 local stringx = require('pl.stringx')
 local file = require('pl.file')
 
@@ -18,7 +26,6 @@ local function replicate(x_inp, batch_size)
    end
    return x
 end
-
 
 local function load_data(fname)
    local data = file.read(fname)
