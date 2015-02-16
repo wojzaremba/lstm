@@ -6,11 +6,9 @@
 ----  LICENSE file in the root directory of this source tree. 
 ----
 
-require('fbtorch')
 require('cunn')
 require('nngraph')
-require('fbcunn.layers.cuda')
-require('fbcunn.layers.LookupTableGPU')
+require('fbcunn')
 require('base')
 local ptb = require('data')
 
