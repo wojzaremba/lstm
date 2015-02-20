@@ -8,9 +8,9 @@
 
 require('cunn')
 require('nngraph')
-require('fbcunn')
 require('base')
 local ptb = require('data')
+require('Embedding')
 
 -- Train 1 day and gives 82 perplexity.
 --[[
@@ -75,7 +75,7 @@ local function create_network()
   local x                = nn.Identity()()
   local y                = nn.Identity()()
   local prev_s           = nn.Identity()()
-  local i                = {[0] = nn.LookupTableGPU(params.vocab_size,
+  local i                = {[0] = Embedding(params.vocab_size,
                                                     params.rnn_size)(x)}
   local next_s           = {}
   local split         = {prev_s:split(2 * params.layers)}
