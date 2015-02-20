@@ -8,7 +8,6 @@
 
 require('cunn')
 require('nngraph')
--- require('fbcunn')
 require('base')
 local ptb = require('data')
 require('Embedding')
@@ -70,20 +69,6 @@ local function lstm(i, prev_c, prev_h)
   local out_gate         = nn.Sigmoid()(new_input_sum())
   local next_h           = nn.CMulTable()({out_gate, nn.Tanh()(next_c)})
   return next_c, next_h
-end
-
-local LookupTableGPU, parent = torch.class('nn.LookupTableGPU', 'nn.Module')
-function LookupTableGPU:__init(nInput, nOutput, featuresInDim2)
-   parent:__init(self)
-   self.nInput = nInput
-   self.nOutput = nOutput
-   self.featuresInDim2 = featuresInDim2 or false
-   -- Careful : weight is transposed from nn.Linear
-   self.weight = torch.Tensor(nInput, nOutput)
-   self.gradWeight = torch.Tensor(nInput, nOutput)
-   self.output = torch.Tensor()
-
-   self:reset()
 end
 
 local function create_network()
