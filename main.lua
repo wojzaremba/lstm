@@ -8,9 +8,10 @@
 
 require('cunn')
 require('nngraph')
-require('fbcunn')
+-- require('fbcunn')
 require('base')
 local ptb = require('data')
+require('Embedding')
 
 -- Train 1 day and gives 82 perplexity.
 --[[
@@ -71,11 +72,25 @@ local function lstm(i, prev_c, prev_h)
   return next_c, next_h
 end
 
+local LookupTableGPU, parent = torch.class('nn.LookupTableGPU', 'nn.Module')
+function LookupTableGPU:__init(nInput, nOutput, featuresInDim2)
+   parent:__init(self)
+   self.nInput = nInput
+   self.nOutput = nOutput
+   self.featuresInDim2 = featuresInDim2 or false
+   -- Careful : weight is transposed from nn.Linear
+   self.weight = torch.Tensor(nInput, nOutput)
+   self.gradWeight = torch.Tensor(nInput, nOutput)
+   self.output = torch.Tensor()
+
+   self:reset()
+end
+
 local function create_network()
   local x                = nn.Identity()()
   local y                = nn.Identity()()
   local prev_s           = nn.Identity()()
-  local i                = {[0] = nn.LookupTableGPU(params.vocab_size,
+  local i                = {[0] = Embedding(params.vocab_size,
                                                     params.rnn_size)(x)}
   local next_s           = {}
   local split         = {prev_s:split(2 * params.layers)}
