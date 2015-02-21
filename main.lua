@@ -5,10 +5,26 @@
 ----  This source code is licensed under the Apache 2 license found in the
 ----  LICENSE file in the root directory of this source tree. 
 ----
-
-require('cunn')
+local ok,cunn = pcall(require, 'fbcunn')
+if not ok then
+    ok,cunn = pcall(require,'cunn')
+    if ok then
+        print("warning: fbcunn not found. Falling back to cunn") 
+        LookupTable = nn.LookupTable
+    else
+        print("Could not find cunn or fbcunn. Either is required")
+        os.exit()
+    end
+else
+    deviceParams = cutorch.getDeviceProperties(1)
+    cudaComputeCapability = deviceParams.major + deviceParams.minor/10
+    if cudaComputeCapability >= 3.5 then
+        LookupTable = nn.LookupTableGPU
+    else
+        LookupTable = nn.LookupTable
+    end
+end
 require('nngraph')
-require('fbcunn')
 require('base')
 local ptb = require('data')
 
@@ -75,7 +91,7 @@ local function create_network()
   local x                = nn.Identity()()
   local y                = nn.Identity()()
   local prev_s           = nn.Identity()()
-  local i                = {[0] = nn.LookupTableGPU(params.vocab_size,
+  local i                = {[0] = LookupTable(params.vocab_size,
                                                     params.rnn_size)(x)}
   local next_s           = {}
   local split         = {prev_s:split(2 * params.layers)}
