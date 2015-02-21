@@ -5,7 +5,6 @@
 ----  This source code is licensed under the Apache 2 license found in the
 ----  LICENSE file in the root directory of this source tree. 
 ----
-
 local ok,cunn = pcall(require, 'fbcunn')
 if not ok then
     ok,cunn = pcall(require,'cunn')
@@ -17,7 +16,13 @@ if not ok then
         os.exit()
     end
 else
-    LookupTable = nn.LookupTableGPU
+    deviceParams = cutorch.getDeviceProperties(1)
+    cudaComputeCapability = deviceParams.major + deviceParams.minor/10
+    if cudaComputeCapability >= 3.5 then
+        LookupTable = nn.LookupTableGPU
+    else
+        LookupTable = nn.LookupTable
+    end
 end
 require('nngraph')
 require('base')
