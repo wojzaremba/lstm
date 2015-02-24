@@ -5,6 +5,8 @@
 ----  This source code is licensed under the Apache 2 license found in the
 ----  LICENSE file in the root directory of this source tree. 
 ----
+require 'nn'
+LookupTable = nn.LookupTable
 local ok,cunn = pcall(require, 'fbcunn')
 if not ok then
     ok,cunn = pcall(require,'cunn')
@@ -13,7 +15,7 @@ if not ok then
         LookupTable = nn.LookupTable
     else
         print("Could not find cunn or fbcunn. Either is required")
-        os.exit()
+        -- os.exit()
     end
 else
     deviceParams = cutorch.getDeviceProperties(1)
@@ -59,7 +61,7 @@ local params = {batch_size=20,
                 max_grad_norm=5}
 
 local function transfer_data(x)
-  return x:cuda()
+  return x --:cuda()
 end
 
 local state_train = {data=transfer_data(ptb.traindataset(params.batch_size))}
@@ -180,7 +182,7 @@ local function bp(state)
     local tmp = model.rnns[i]:backward({x, y, s},
                                        {derr, model.ds})[3]
     g_replace_table(model.ds, tmp)
-    cutorch.synchronize()
+    -- cutorch.synchronize()
   end
   state.pos = state.pos + params.seq_length
   model.norm_dw = paramdx:norm()
@@ -263,7 +265,7 @@ local function main()
       end
     end
     if step % 33 == 0 then
-      cutorch.synchronize()
+      -- cutorch.synchronize()
       collectgarbage()
     end
   end

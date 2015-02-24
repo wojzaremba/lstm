@@ -71,14 +71,14 @@ function g_init_gpu(args)
   local gpuidx = args
   gpuidx = gpuidx[1] or 1
   print(string.format("Using %s-th gpu", gpuidx))
-  cutorch.setDevice(gpuidx)
+  -- cutorch.setDevice(gpuidx)
   g_make_deterministic(1)
 end
 
 function g_make_deterministic(seed)
   torch.manualSeed(seed)
-  cutorch.manualSeed(seed)
-  torch.zeros(1, 1):cuda():uniform()
+  -- cutorch.manualSeed(seed)
+  torch.zeros(1, 1):uniform()
 end
 
 function g_replace_table(to, from)
