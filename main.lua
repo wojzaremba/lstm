@@ -5,6 +5,7 @@
 ----  This source code is licensed under the Apache 2 license found in the
 ----  LICENSE file in the root directory of this source tree. 
 ----
+
 local ok,cunn = pcall(require, 'fbcunn')
 if not ok then
     ok,cunn = pcall(require,'cunn')
