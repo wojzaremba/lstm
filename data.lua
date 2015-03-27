@@ -50,7 +50,7 @@ local function traindataset(batch_size)
 end
 
 -- Intentionally we repeat dimensions without offseting.
--- Pass over this batch corresponds to fully sequential processing.
+-- Pass over this batch corresponds to the fully sequential processing.
 local function testdataset(batch_size)
    local x = load_data(ptb_path .. "ptb.test.txt")
    x = x:resize(x:size(1), 1):expand(x:size(1), batch_size)

@@ -18,11 +18,7 @@ if not ok then
 else
     deviceParams = cutorch.getDeviceProperties(1)
     cudaComputeCapability = deviceParams.major + deviceParams.minor/10
-    if cudaComputeCapability >= 3.5 then
-        LookupTable = nn.LookupTableGPU
-    else
-        LookupTable = nn.LookupTable
-    end
+    LookupTable = nn.LookupTable
 end
 require('nngraph')
 require('base')
@@ -62,10 +58,7 @@ local function transfer_data(x)
   return x:cuda()
 end
 
-local state_train = {data=transfer_data(ptb.traindataset(params.batch_size))}
-local state_valid =  {data=transfer_data(ptb.validdataset(params.batch_size))}
-local state_test =  {data=transfer_data(ptb.testdataset(params.batch_size))}
-
+local state_train, state_valid, state_test
 local model = {}
 local paramx, paramdx
 
@@ -209,17 +202,23 @@ local function run_test()
   local perp = 0
   local len = state_test.data:size(1)
   g_replace_table(model.s[0], model.start_s)
-  for i = 1, (params.seq_length - 1) do
+  for i = 1, (len - 1) do
     local x = state_test.data[i]
     local y = state_test.data[i + 1]
     local s = model.s[i - 1]
-    model.err[i], model.s[i] = unpack(model.rnns[i]:forward({x, y, s}))
+    perp_tmp, model.s[1] = unpack(model.rnns[1]:forward({x, y, model.s[0]}))
+    perp = perp + perp_tmp[1]
+    g_replace_table(model.s[0], model.s[1])
   end
-  print("Test set perplexity : " .. g_f3(torch.exp(perp / len)))
+  print("Test set perplexity : " .. g_f3(torch.exp(perp / (len - 1))))
   g_enable_dropout(model.rnns)
 end
 
 local function main()
+  g_init_gpu(arg)
+  state_train = {data=transfer_data(ptb.traindataset(params.batch_size))}
+  state_valid =  {data=transfer_data(ptb.validdataset(params.batch_size))}
+  state_test =  {data=transfer_data(ptb.testdataset(params.batch_size))}
   print("Network parameters:")
   print(params)
   local states = {state_train, state_valid, state_test}
@@ -271,5 +270,4 @@ local function main()
   print("Training is over.")
 end
 
-g_init_gpu(arg)
 main()
