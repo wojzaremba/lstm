@@ -205,7 +205,6 @@ local function run_test()
   for i = 1, (len - 1) do
     local x = state_test.data[i]
     local y = state_test.data[i + 1]
-    local s = model.s[i - 1]
     perp_tmp, model.s[1] = unpack(model.rnns[1]:forward({x, y, model.s[0]}))
     perp = perp + perp_tmp[1]
     g_replace_table(model.s[0], model.s[1])
