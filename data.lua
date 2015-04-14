@@ -11,6 +11,14 @@ local file = require('pl.file')
 
 local ptb_path = "./data/"
 
+local trainfn = ptb_path .. "ptb.train.txt"
+local testfn  = ptb_path .. "ptb.test.txt"
+local validfn = ptb_path .. "ptb.valid.txt"
+--[[
+local trainfn = ptb_path .. "ptb.char.train.txt"
+local validfn = ptb_path .. "ptb.char.valid.txt"
+--]]
+
 local vocab_idx = 0
 local vocab_map = {}
 
@@ -31,7 +39,7 @@ local function load_data(fname)
    local data = file.read(fname)
    data = stringx.replace(data, '\n', '<eos>')
    data = stringx.split(data)
-   print(string.format("Loading %s, size of data = %d", fname, #data))
+   --print(string.format("Loading %s, size of data = %d", fname, #data))
    local x = torch.zeros(#data)
    for i = 1, #data do
       if vocab_map[data[i]] == nil then
@@ -43,8 +51,8 @@ local function load_data(fname)
    return x
 end
 
-local function traindataset(batch_size)
-   local x = load_data(ptb_path .. "ptb.train.txt")
+local function traindataset(batch_size, char)
+   local x = load_data(trainfn)
    x = replicate(x, batch_size)
    return x
 end
@@ -52,17 +60,20 @@ end
 -- Intentionally we repeat dimensions without offseting.
 -- Pass over this batch corresponds to the fully sequential processing.
 local function testdataset(batch_size)
-   local x = load_data(ptb_path .. "ptb.test.txt")
-   x = x:resize(x:size(1), 1):expand(x:size(1), batch_size)
-   return x
+   if testfn then
+      local x = load_data(testfn)
+      x = x:resize(x:size(1), 1):expand(x:size(1), batch_size)
+      return x
+   end
 end
 
 local function validdataset(batch_size)
-   local x = load_data(ptb_path .. "ptb.valid.txt")
+   local x = load_data(validfn)
    x = replicate(x, batch_size)
    return x
 end
 
 return {traindataset=traindataset,
         testdataset=testdataset,
-        validdataset=validdataset}
+        validdataset=validdataset,
+        vocab_map=vocab_map}
