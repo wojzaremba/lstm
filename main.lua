@@ -62,21 +62,29 @@ local state_train, state_valid, state_test
 local model = {}
 local paramx, paramdx
 
-local function lstm(i, prev_c, prev_h)
-  local function new_input_sum()
-    local i2h            = nn.Linear(params.rnn_size, params.rnn_size)
-    local h2h            = nn.Linear(params.rnn_size, params.rnn_size)
-    return nn.CAddTable()({i2h(i), h2h(prev_h)})
-  end
-  local in_gate          = nn.Sigmoid()(new_input_sum())
-  local forget_gate      = nn.Sigmoid()(new_input_sum())
-  local in_gate2         = nn.Tanh()(new_input_sum())
+local function lstm(x, prev_c, prev_h)
+  -- Calculate all four gates in one go
+  local i2h = nn.Linear(params.rnn_size, 4*params.rnn_size)(x)
+  local h2h = nn.Linear(params.rnn_size, 4*params.rnn_size)(prev_h)
+  local gates = nn.CAddTable()({i2h, h2h})
+  
+  -- Reshape to (batch_size, n_gates, hid_size)
+  -- Then slize the n_gates dimension, i.e dimension 2
+  local reshaped_gates =  nn.Reshape(4,params.rnn_size)(gates)
+  local sliced_gates = nn.SplitTable(2)(reshaped_gates)
+  
+  -- Use select gate to fetch each gate and apply nonlinearity
+  local in_gate          = nn.Sigmoid()(nn.SelectTable(1)(sliced_gates))
+  local in_transform     = nn.Tanh()(nn.SelectTable(2)(sliced_gates))
+  local forget_gate      = nn.Sigmoid()(nn.SelectTable(3)(sliced_gates))
+  local out_gate         = nn.Sigmoid()(nn.SelectTable(4)(sliced_gates))
+
   local next_c           = nn.CAddTable()({
-    nn.CMulTable()({forget_gate, prev_c}),
-    nn.CMulTable()({in_gate,     in_gate2})
+      nn.CMulTable()({forget_gate, prev_c}),
+      nn.CMulTable()({in_gate,     in_transform})
   })
-  local out_gate         = nn.Sigmoid()(new_input_sum())
   local next_h           = nn.CMulTable()({out_gate, nn.Tanh()(next_c)})
+
   return next_c, next_h
 end
 
