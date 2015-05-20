@@ -33,13 +33,6 @@ end
 function g_cloneManyTimes(net, T)
   local clones = {}
   local params, gradParams = net:parameters()
-  if params == nil then
-    params = {}
-  end
-  local paramsNoGrad
-  if net.parametersNoGrad then
-    paramsNoGrad = net:parametersNoGrad()
-  end
   local mem = torch.MemoryFile("w"):binary()
   mem:writeObject(net)
   for t = 1, T do
@@ -49,16 +42,9 @@ function g_cloneManyTimes(net, T)
     local clone = reader:readObject()
     reader:close()
     local cloneParams, cloneGradParams = clone:parameters()
-    local cloneParamsNoGrad
     for i = 1, #params do
       cloneParams[i]:set(params[i])
       cloneGradParams[i]:set(gradParams[i])
-    end
-    if paramsNoGrad then
-      cloneParamsNoGrad = clone:parametersNoGrad()
-      for i =1,#paramsNoGrad do
-        cloneParamsNoGrad[i]:set(paramsNoGrad[i])
-      end
     end
     clones[t] = clone
     collectgarbage()
