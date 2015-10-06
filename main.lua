@@ -1,15 +1,8 @@
---
-----  Copyright (c) 2014, Facebook, Inc.
-----  All rights reserved.
-----
-----  This source code is licensed under the Apache 2 license found in the
-----  LICENSE file in the root directory of this source tree. 
-----
 local ok,cunn = pcall(require, 'fbcunn')
 if not ok then
     ok,cunn = pcall(require,'cunn')
     if ok then
-        print("warning: fbcunn not found. Falling back to cunn") 
+        print("warning: fbcunn not found. Falling back to cunn")
         LookupTable = nn.LookupTable
     else
         print("Could not find cunn or fbcunn. Either is required")
@@ -20,59 +13,110 @@ else
     cudaComputeCapability = deviceParams.major + deviceParams.minor/10
     LookupTable = nn.LookupTable
 end
+require('paths')
 require('nngraph')
 require('base')
-local ptb = require('data')
-
--- Train 1 day and gives 82 perplexity.
---[[
-local params = {batch_size=20,
-                seq_length=35,
-                layers=2,
-                decay=1.15,
-                rnn_size=1500,
-                dropout=0.65,
-                init_weight=0.04,
-                lr=1,
-                vocab_size=10000,
-                max_epoch=14,
-                max_max_epoch=55,
-                max_grad_norm=10}
-               ]]--
-
--- Trains 1h and gives test 115 perplexity.
-local params = {batch_size=20,
-                seq_length=20,
-                layers=2,
-                decay=2,
-                rnn_size=200,
-                dropout=0,
-                init_weight=0.1,
-                lr=1,
-                vocab_size=10000,
-                max_epoch=4,
-                max_max_epoch=13,
-                max_grad_norm=5}
 
 local function transfer_data(x)
   return x:cuda()
 end
 
+-- Train 1 day and gives 82 perplexity.
+--[[
+local params = {batch_size=20,
+                max_seq_length=tonumber(arg[2]),
+                layers=2,
+                decay=1.15,
+                rnn_size=1000,
+                dropout=0.65,
+                init_weight=0.08,
+                lr=0.1,
+                vocab_size=25002,
+                max_epoch=14,
+                max_max_epoch=55,
+                max_grad_norm=10}
+
+--]]
+-- Trains 1h and gives test 115 perplexity.
+-- [[
+local params = {batch_size=32,
+                max_seq_length=tonumber(arg[2]),
+                layers=2,
+                decay=2,
+                rnn_size=1000,
+                dropout=0.2,
+                init_weight=0.08,
+                lr=0.1,
+                vocab_size=25002,
+                max_epoch=4,
+                max_max_epoch=13,
+                max_grad_norm=5}
+
+
+local stringx = require('pl.stringx')
+local data_path = "./hdata/"
+
+local function load_data_into_docs(fname)
+  local docs = {}
+  local doc = {}
+
+  local file = torch.DiskFile(fname, 'r')
+  file:quiet()
+  repeat
+    local sent = file:readString('*l')
+    sent = string.gsub(sent, '%s*$', '')
+    if #sent ~= 0 then
+      sent = stringx.split(sent)
+      table.insert(sent, '<eos>')
+      table.insert(doc, sent)
+    else
+      table.insert(doc[#doc], '<eod>')
+      table.insert(docs, doc)
+      doc = {}
+    end
+  until file:hasError()
+
+  return docs
+end
+
+local function load_data_into_sents(fname)
+  local sents = {}
+
+  local file = torch.DiskFile(fname, 'r')
+  file:quiet()
+  repeat
+    local sent = file:readString('*l')
+    sent = string.gsub(sent, '%s*$', '')
+    if #sent ~= 0 then
+      sent = stringx.split(sent)
+      if #sent < params.max_seq_length then
+        table.insert(sent, params.vocab_size-1)
+        table.insert(sents, sent)
+      end
+      for wid = #sent+1, params.max_seq_length do
+        sents[#sents][wid] = params.vocab_size
+      end
+    end
+  until file:hasError()
+
+  return sents
+end
+
 local state_train, state_valid, state_test
 local model = {}
-local paramx, paramdx
+local paramx_enc, paramdx_enc, paramx_dec, paramdx_dec
 
 local function lstm(x, prev_c, prev_h)
   -- Calculate all four gates in one go
   local i2h = nn.Linear(params.rnn_size, 4*params.rnn_size)(x)
   local h2h = nn.Linear(params.rnn_size, 4*params.rnn_size)(prev_h)
   local gates = nn.CAddTable()({i2h, h2h})
-  
+
   -- Reshape to (batch_size, n_gates, hid_size)
   -- Then slize the n_gates dimension, i.e dimension 2
   local reshaped_gates =  nn.Reshape(4,params.rnn_size)(gates)
   local sliced_gates = nn.SplitTable(2)(reshaped_gates)
-  
+
   -- Use select gate to fetch each gate and apply nonlinearity
   local in_gate          = nn.Sigmoid()(nn.SelectTable(1)(sliced_gates))
   local in_transform     = nn.Tanh()(nn.SelectTable(2)(sliced_gates))
@@ -91,166 +135,279 @@ end
 local function create_network()
   local x                = nn.Identity()()
   local y                = nn.Identity()()
-  local prev_s           = nn.Identity()()
+  local prev_s_enc       = nn.Identity()()
   local i                = {[0] = LookupTable(params.vocab_size,
                                                     params.rnn_size)(x)}
-  local next_s           = {}
-  local split         = {prev_s:split(2 * params.layers)}
+  local next_s_enc       = {}
+  local split_enc        = {prev_s_enc:split(2 * params.layers)}
   for layer_idx = 1, params.layers do
-    local prev_c         = split[2 * layer_idx - 1]
-    local prev_h         = split[2 * layer_idx]
+    local prev_c         = split_enc[2 * layer_idx - 1]
+    local prev_h         = split_enc[2 * layer_idx]
     local dropped        = nn.Dropout(params.dropout)(i[layer_idx - 1])
     local next_c, next_h = lstm(dropped, prev_c, prev_h)
-    table.insert(next_s, next_c)
-    table.insert(next_s, next_h)
+    table.insert(next_s_enc, next_c)
+    table.insert(next_s_enc, next_h)
     i[layer_idx] = next_h
   end
+
+  local encoder = nn.gModule(
+    {x, prev_s_enc},
+    {i[params.layers], nn.Identity()(next_s_enc)}
+  )
+
+  local prev_s_dec      = nn.Identity()()
+  local j_0             = nn.Identity()()
+  local j               = {[0] = j_0}
+  local next_s_dec      = {}
+  local split_dec       = {prev_s_dec:split(2 * params.layers)}
+  for layer_idx = 1, params.layers do
+    local prev_c         = split_dec[2 * layer_idx - 1]
+    local prev_h         = split_dec[2 * layer_idx]
+    local dropped        = nn.Dropout(params.dropout)(j[layer_idx - 1])
+    local next_c, next_h = lstm(dropped, prev_c, prev_h)
+    table.insert(next_s_dec, next_c)
+    table.insert(next_s_dec, next_h)
+    j[layer_idx] = next_h
+  end
+
   local h2y              = nn.Linear(params.rnn_size, params.vocab_size)
-  local dropped          = nn.Dropout(params.dropout)(i[params.layers])
+  local dropped          = nn.Dropout(params.dropout)(j[params.layers])
   local pred             = nn.LogSoftMax()(h2y(dropped))
-  local err              = nn.ClassNLLCriterion()({pred, y})
-  local module           = nn.gModule({x, y, prev_s},
-                                      {err, nn.Identity()(next_s)})
-  module:getParameters():uniform(-params.init_weight, params.init_weight)
-  return transfer_data(module)
+  local mask             = torch.ones(params.vocab_size)
+  mask[params.vocab_size] = 0
+  local err              = nn.ClassNLLCriterion(mask)({pred, y})
+
+  local decoder = nn.gModule(
+    {j_0, y, prev_s_dec},
+    {err, nn.Identity()(next_s_dec), pred}
+  )
+
+  encoder:getParameters():uniform(-params.init_weight, params.init_weight)
+  decoder:getParameters():uniform(-params.init_weight, params.init_weight)
+  encoder = transfer_data(encoder)
+  decoder = transfer_data(decoder)
+
+  return {encoder, decoder}
 end
 
 local function setup()
   print("Creating a RNN LSTM network.")
-  local core_network = create_network()
-  paramx, paramdx = core_network:getParameters()
-  model.s = {}
-  model.ds = {}
-  model.start_s = {}
-  for j = 0, params.seq_length do
-    model.s[j] = {}
+  local encoder, decoder = unpack(create_network())
+  paramx_enc, paramdx_enc = encoder:getParameters()
+  paramx_dec, paramdx_dec = decoder:getParameters()
+
+  model.s_enc = {}
+  model.ds_enc = {}
+  model.start_s_enc = {}
+  model.s_dec = {}
+  model.ds_dec = {}
+  model.start_s_dec = {}
+  model.embeddings = {}
+
+  for j = 0, params.max_seq_length do
+    model.s_enc[j] = {}
+    model.s_dec[j] = {}
     for d = 1, 2 * params.layers do
-      model.s[j][d] = transfer_data(torch.zeros(params.batch_size, params.rnn_size))
+      model.s_enc[j][d] = transfer_data(torch.zeros(params.batch_size, params.rnn_size))
+      model.s_dec[j][d] = transfer_data(torch.zeros(params.batch_size, params.rnn_size))
     end
+
+    model.embeddings[j] = transfer_data(torch.zeros(params.batch_size, params.rnn_size))
   end
   for d = 1, 2 * params.layers do
-    model.start_s[d] = transfer_data(torch.zeros(params.batch_size, params.rnn_size))
-    model.ds[d] = transfer_data(torch.zeros(params.batch_size, params.rnn_size))
+    model.start_s_enc[d] = transfer_data(torch.zeros(params.batch_size, params.rnn_size))
+    model.ds_enc[d] = transfer_data(torch.zeros(params.batch_size, params.rnn_size))
+    model.start_s_dec[d] = transfer_data(torch.zeros(params.batch_size, params.rnn_size))
+    model.ds_dec[d] = transfer_data(torch.zeros(params.batch_size, params.rnn_size))
   end
-  model.core_network = core_network
-  model.rnns = g_cloneManyTimes(core_network, params.seq_length)
-  model.norm_dw = 0
-  model.err = transfer_data(torch.zeros(params.seq_length))
+
+  model.encoder = encoder
+  model.decoder = decoder
+  model.rnns_enc = g_cloneManyTimes(encoder, params.max_seq_length)
+  model.rnns_dec = g_cloneManyTimes(decoder, params.max_seq_length)
+  model.norm_dw_enc = 0
+  model.norm_dw_dec = 0
+  model.err = transfer_data(torch.zeros(params.max_seq_length))
 end
 
 local function reset_state(state)
   state.pos = 1
-  if model ~= nil and model.start_s ~= nil then
+  if model ~= nil
+    and model.start_s_enc ~= nil
+    and model.start_s_dec ~= nil then
     for d = 1, 2 * params.layers do
-      model.start_s[d]:zero()
+      model.start_s_enc[d]:zero()
+      model.start_s_dec[d]:zero()
     end
   end
 end
 
 local function reset_ds()
-  for d = 1, #model.ds do
-    model.ds[d]:zero()
+  for d = 1, #model.ds_enc do
+    model.ds_enc[d]:zero()
+    model.ds_dec[d]:zero()
   end
 end
 
-local function fp(state)
-  g_replace_table(model.s[0], model.start_s)
-  if state.pos + params.seq_length > state.data:size(1) then
+local function _fp(state)
+  g_replace_table(model.s_enc[0], model.start_s_enc)
+  g_replace_table(model.s_dec[0], model.start_s_dec)
+
+  if state.pos + params.batch_size > #state.data then
     reset_state(state)
   end
-  for i = 1, params.seq_length do
-    local x = state.data[state.pos]
-    local y = state.data[state.pos + 1]
-    local s = model.s[i - 1]
-    model.err[i], model.s[i] = unpack(model.rnns[i]:forward({x, y, s}))
-    state.pos = state.pos + 1
+
+  local data_batch = torch.Tensor(state.data[state.pos])
+  for data_id = 1, params.batch_size-1 do
+    data_batch = torch.cat(
+      data_batch, torch.Tensor(state.data[state.pos + data_id]), 2
+    )
   end
-  g_replace_table(model.start_s, model.s[params.seq_length])
+  state.data_batch = transfer_data(data_batch)
+
+  for i = 1, params.max_seq_length do
+    local x = state.data_batch[i]
+    local y = state.data_batch[i]
+    local s_enc = model.s_enc[i - 1]
+    local s_dec = model.s_dec[i - 1]
+    model.embeddings[i], model.s_enc[i] = unpack(
+      model.rnns_enc[i]:forward({x, s_enc})
+    )
+    model.err[i], model.s_dec[i] = unpack(
+      model.rnns_dec[i]:forward({model.embeddings[i], y, s_dec})
+    )
+  end
+  g_replace_table(model.start_s_enc, model.s_enc[params.max_seq_length])
+  g_replace_table(model.start_s_dec, model.s_dec[params.max_seq_length])
+
   return model.err:mean()
 end
 
-local function bp(state)
-  paramdx:zero()
+local function _bp(state)
+  paramdx_enc:zero()
+  paramdx_dec:zero()
   reset_ds()
-  for i = params.seq_length, 1, -1 do
-    state.pos = state.pos - 1
-    local x = state.data[state.pos]
-    local y = state.data[state.pos + 1]
-    local s = model.s[i - 1]
+
+  for i = params.max_seq_length, 1, -1 do
+    local x = state.data_batch[i]
+    local y = state.data_batch[i]
+    local s_dec = model.s_dec[i - 1]
+    local s_enc = model.s_enc[i - 1]
+    local embedding = model.embeddings[i]
+    local pred = transfer_data(torch.zeros(params.batch_size, params.vocab_size))
     local derr = transfer_data(torch.ones(1))
-    local tmp = model.rnns[i]:backward({x, y, s},
-                                       {derr, model.ds})[3]
-    g_replace_table(model.ds, tmp)
+
+    local d_embedding, tmp_dec
+    d_embedding, _, tmp_dec = unpack(model.rnns_dec[i]:backward(
+      {embedding, y, s_dec},
+      {derr, model.ds_dec, pred}
+    ))
+    local tmp_enc = model.rnns_enc[i]:backward(
+      {x, s_enc},
+      {d_embedding, model.ds_enc}
+    )[2]
+
+    g_replace_table(model.ds_enc, tmp_enc)
+    g_replace_table(model.ds_dec, tmp_dec)
     cutorch.synchronize()
   end
-  state.pos = state.pos + params.seq_length
-  model.norm_dw = paramdx:norm()
-  if model.norm_dw > params.max_grad_norm then
-    local shrink_factor = params.max_grad_norm / model.norm_dw
-    paramdx:mul(shrink_factor)
+
+  state.pos = state.pos + params.batch_size
+  model.norm_dw_enc = paramdx_enc:norm()
+  model.norm_dw_dec = paramdx_dec:norm()
+  if model.norm_dw_enc > params.max_grad_norm then
+    local shrink_factor = params.max_grad_norm / model.norm_dw_enc
+    paramdx_enc:mul(shrink_factor)
   end
-  paramx:add(paramdx:mul(-params.lr))
+  if model.norm_dw_dec > params.max_grad_norm then
+    local shrink_factor = params.max_grad_norm / model.norm_dw_dec
+    paramdx_dec:mul(shrink_factor)
+  end
+  paramx_enc:add(paramdx_enc:mul(-params.lr))
+  paramx_dec:add(paramdx_dec:mul(-params.lr))
 end
 
 local function run_valid()
   reset_state(state_valid)
-  g_disable_dropout(model.rnns)
-  local len = (state_valid.data:size(1) - 1) / (params.seq_length)
+  g_disable_dropout(model.rnns_enc)
+  g_disable_dropout(model.rnns_dec)
+  local len = #state_valid.data / params.batch_size
   local perp = 0
   for i = 1, len do
-    perp = perp + fp(state_valid)
+    perp = perp + _fp(state_valid)
   end
   print("Validation set perplexity : " .. g_f3(torch.exp(perp / len)))
-  g_enable_dropout(model.rnns)
+  g_enable_dropout(model.rnns_enc)
+  g_enable_dropout(model.rnns_dec)
 end
 
 local function run_test()
   reset_state(state_test)
-  g_disable_dropout(model.rnns)
+  g_disable_dropout(model.rnns_enc)
+  g_disable_dropout(model.rnns_dec)
+  local len = #state_test.data / params.batch_size
   local perp = 0
-  local len = state_test.data:size(1)
-  g_replace_table(model.s[0], model.start_s)
-  for i = 1, (len - 1) do
-    local x = state_test.data[i]
-    local y = state_test.data[i + 1]
-    perp_tmp, model.s[1] = unpack(model.rnns[1]:forward({x, y, model.s[0]}))
-    perp = perp + perp_tmp[1]
-    g_replace_table(model.s[0], model.s[1])
+  for i = 1, len do
+    perp = perp + _fp(state_test)
   end
-  print("Test set perplexity : " .. g_f3(torch.exp(perp / (len - 1))))
-  g_enable_dropout(model.rnns)
+  print("Test set perplexity : " .. g_f3(torch.exp(perp / len)))
+  g_enable_dropout(model.rnns_enc)
+  g_enable_dropout(model.rnns_dec)
 end
 
 local function main()
   g_init_gpu(arg)
-  state_train = {data=transfer_data(ptb.traindataset(params.batch_size))}
-  state_valid =  {data=transfer_data(ptb.validdataset(params.batch_size))}
-  state_test =  {data=transfer_data(ptb.testdataset(params.batch_size))}
-  print("Network parameters:")
-  print(params)
-  local states = {state_train, state_valid, state_test}
-  for _, state in pairs(states) do
-    reset_state(state)
+
+  local filenames = {}
+  for filename in paths.iterfiles(data_path .. 'train_seg') do
+    table.insert(filenames, filename)
   end
+  local num_of_sents = 0
+  for id, f in pairs(filenames) do
+    local sents = load_data_into_sents(
+      data_path .. "train_seg/" .. f
+    )
+    num_of_sents = num_of_sents + #sents
+    collectgarbage()
+  end
+  collectgarbage()
+  local epoch_size = torch.floor(num_of_sents / params.batch_size)
+
+  local train_sents = load_data_into_sents(
+    data_path .. "train_seg/" .. filenames[1]
+  )
+  local valid_sents = load_data_into_sents(
+    data_path .. "valid_permute_segment.txt"
+  )
+  local test_sents = load_data_into_sents(
+    data_path .. "test_permute_segment.txt"
+  )
+  state_train = {data=train_sents}
+  state_valid = {data=valid_sents}
+  state_test = {data=test_sents}
   setup()
+  reset_state(state_train)
+
   local step = 0
   local epoch = 0
   local total_cases = 0
   local beginning_time = torch.tic()
   local start_time = torch.tic()
   print("Starting training.")
-  local words_per_step = params.seq_length * params.batch_size
-  local epoch_size = torch.floor(state_train.data:size(1) / params.seq_length)
+
   local perps
+  local file_step = 1
+  local file_size = torch.floor(#state_train.data / params.batch_size)
   while epoch < params.max_max_epoch do
-    local perp = fp(state_train)
+    local perp = _fp(state_train)
     if perps == nil then
       perps = torch.zeros(epoch_size):add(perp)
     end
     perps[step % epoch_size + 1] = perp
     step = step + 1
-    bp(state_train)
-    total_cases = total_cases + params.seq_length * params.batch_size
+    _bp(state_train)
+
+    total_cases = total_cases + params.max_seq_length * params.batch_size
     epoch = step / epoch_size
     if step % torch.round(epoch_size / 10) == 10 then
       local wps = torch.floor(total_cases / torch.toc(start_time))
@@ -258,7 +415,8 @@ local function main()
       print('epoch = ' .. g_f3(epoch) ..
             ', train perp. = ' .. g_f3(torch.exp(perps:mean())) ..
             ', wps = ' .. wps ..
-            ', dw:norm() = ' .. g_f3(model.norm_dw) ..
+            ', encoder dw:norm() = ' .. g_f3(model.norm_dw_enc) ..
+            ', decoder dw:norm() = ' .. g_f3(model.norm_dw_dec) ..
             ', lr = ' ..  g_f3(params.lr) ..
             ', since beginning = ' .. since_beginning .. ' mins.')
     end
@@ -267,10 +425,36 @@ local function main()
       if epoch > params.max_epoch then
           params.lr = params.lr / params.decay
       end
+
+      torch.save(
+        'models/'..tostring(torch.floor(epoch))..'.enc', model.encoder
+      )
+      torch.save(
+        'models/'..tostring(torch.floor(epoch))..'.dec', model.decoder
+      )
     end
     if step % 33 == 0 then
       cutorch.synchronize()
       collectgarbage()
+    end
+
+    if step == file_size then
+      file_step = file_step + 1
+      if file_step > #filenames then
+        file_step = 1
+      end
+
+      print('Current file: ' .. filenames[file_step] .. 
+            ', file no. ' .. file_step ..
+            ', current step: ' .. step)
+
+      state_train.data = load_data_into_sents(
+        data_path .. "train_seg/" .. filenames[file_step]
+      )
+      state_train.pos = 1
+      file_size = file_size + torch.floor(
+        #state_train.data / params.batch_size
+      )
     end
   end
   run_test()
