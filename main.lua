@@ -251,7 +251,6 @@ end
 
 local function _fp(state)
   g_replace_table(model.s_enc[0], model.start_s_enc)
-  g_replace_table(model.s_dec[0], model.start_s_dec)
 
   if state.pos + params.batch_size > #state.data then
     reset_state(state)
@@ -267,18 +266,30 @@ local function _fp(state)
 
   for i = 1, params.max_seq_length do
     local x = state.data_batch[i]
-    local y = state.data_batch[i]
     local s_enc = model.s_enc[i - 1]
-    local s_dec = model.s_dec[i - 1]
     model.embeddings[i], model.s_enc[i] = unpack(
       model.rnns_enc[i]:forward({x, s_enc})
     )
+  end
+
+  g_replace_table(
+    model.s_dec[0], model.s_enc[params.max_seq_length]
+  )
+  local null = transfer_data(torch.zeros(params.batch_size, params.rnn_size))
+  model.err[1], model.s_dec[1] = unpack(
+    model.rnns_dec[1]:forward(
+      {null, state.data_batch[1], model.s_dec[0]}
+    )
+  )
+
+  for i = 2, params.max_seq_length do
+    local y = state.data_batch[i]
+    local s_dec = model.s_dec[i - 1]
     model.err[i], model.s_dec[i] = unpack(
       model.rnns_dec[i]:forward({model.embeddings[i], y, s_dec})
     )
   end
   g_replace_table(model.start_s_enc, model.s_enc[params.max_seq_length])
-  g_replace_table(model.start_s_dec, model.s_dec[params.max_seq_length])
 
   return model.err:mean()
 end
@@ -335,6 +346,7 @@ local function run_valid()
   local perp = 0
   for i = 1, len do
     perp = perp + _fp(state_valid)
+    state_valid.pos = state_valid.pos + params.batch_size
   end
   print("Validation set perplexity : " .. g_f3(torch.exp(perp / len)))
   g_enable_dropout(model.rnns_enc)
@@ -349,6 +361,7 @@ local function run_test()
   local perp = 0
   for i = 1, len do
     perp = perp + _fp(state_test)
+    state_test.pos = state_test.pos + params.batch_size
   end
   print("Test set perplexity : " .. g_f3(torch.exp(perp / len)))
   g_enable_dropout(model.rnns_enc)
@@ -444,7 +457,7 @@ local function main()
         file_step = 1
       end
 
-      print('Current file: ' .. filenames[file_step] .. 
+      print('Current file: ' .. filenames[file_step] ..
             ', file no. ' .. file_step ..
             ', current step: ' .. step)
 
