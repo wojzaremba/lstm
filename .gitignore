@@ -1,0 +1,7 @@
+hdata/
+models*/
+oldModels/
+*.sublime-*
+preds*
+training.*log
+embs*
