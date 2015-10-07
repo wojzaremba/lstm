@@ -1,7 +1,7 @@
 hdata/
-models/
+models*/
 oldModels/
 *.sublime-*
 preds*
-training.log
+training.*log
 embs*
