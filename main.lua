@@ -286,7 +286,7 @@ local function _fp(state)
     local y = state.data_batch[i]
     local s_dec = model.s_dec[i - 1]
     model.err[i], model.s_dec[i] = unpack(
-      model.rnns_dec[i]:forward({model.embeddings[i], y, s_dec})
+      model.rnns_dec[i]:forward({model.embeddings[i-1], y, s_dec})
     )
   end
   g_replace_table(model.start_s_enc, model.s_enc[params.max_seq_length])
