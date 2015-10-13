@@ -54,6 +54,8 @@ local params = {batch_size=32,
 
 local stringx = require('pl.stringx')
 local data_path = "./hdata/"
+local EOS = params.vocab_size-1
+local NIL = params.vocab_size
 
 local function load_data_into_sents(fname)
   local sents = {}
@@ -66,11 +68,11 @@ local function load_data_into_sents(fname)
     if #sent ~= 0 then
       sent = stringx.split(sent)
       if #sent < params.max_seq_length then
-        table.insert(sent, params.vocab_size-1)
+        table.insert(sent, EOS)
         table.insert(sents, sent)
       end
       for wid = #sent+1, params.max_seq_length do
-        sents[#sents][wid] = params.vocab_size
+        sents[#sents][wid] = NIL
       end
     end
   until file:hasError()
@@ -86,8 +88,8 @@ local preds = {}
 
 local function setup()
   print("Loading RNN LSTM networks...")
-  local encoder = torch.load('./models/12.enc')
-  local decoder = torch.load('./models/12.dec')
+  local encoder = torch.load('./models.1007/12.enc')
+  local decoder = torch.load('./models.1007/12.dec')
 
   paramx_enc, paramdx_enc = encoder:getParameters()
   paramx_dec, paramdx_dec = decoder:getParameters()
@@ -148,7 +150,6 @@ end
 
 local function _fp(state)
   g_replace_table(model.s_enc[0], model.start_s_enc)
-  g_replace_table(model.s_dec[0], model.start_s_dec)
 
   if state.pos + params.batch_size > #state.data then
     reset_state(state)
@@ -162,20 +163,42 @@ local function _fp(state)
   end
   state.data_batch = transfer_data(data_batch)
 
+  local eos_pos = transfer_data(
+    torch.ones(params.batch_size):mul(params.max_seq_length)
+  )
   for i = 1, params.max_seq_length do
     local x = state.data_batch[i]
-    local y = state.data_batch[i]
     local s_enc = model.s_enc[i - 1]
-    local s_dec = model.s_dec[i - 1]
     model.embeddings[i], model.s_enc[i] = unpack(
       model.rnns_enc[i]:forward({x, s_enc})
     )
+
+    -- if some sentences reach <eos> at i-th word...
+    if eos_pos[x:eq(EOS)]:dim() == 1 then
+      eos_pos[x:eq(EOS)] = i
+    end
+  end
+
+  for l = 1, 2*params.layers do
+    for b = 1, params.batch_size do
+      model.s_dec[0][l][b]:copy(model.s_enc[eos_pos[b]][l][b])
+    end
+  end
+  local null = transfer_data(torch.zeros(params.batch_size, params.rnn_size))
+  model.err[1], model.s_dec[1], model.preds[1] = unpack(
+    model.rnns_dec[1]:forward(
+      {null, state.data_batch[1], model.s_dec[0]}
+    )
+  )
+
+  for i = 2, params.max_seq_length do
+    local y = state.data_batch[i]
+    local s_dec = model.s_dec[i - 1]
     model.err[i], model.s_dec[i], model.preds[i] = unpack(
-      model.rnns_dec[i]:forward({model.embeddings[i], y, s_dec})
+      model.rnns_dec[i]:forward({model.embeddings[i-1], y, s_dec})
     )
   end
   g_replace_table(model.start_s_enc, model.s_enc[params.max_seq_length])
-  g_replace_table(model.start_s_dec, model.s_dec[params.max_seq_length])
 
   return model.err:mean()
 end
@@ -217,7 +240,7 @@ local function main()
   g_init_gpu(arg)
 
   local test_sents = load_data_into_sents(
-    data_path .. "test_permute_segment.txt"
+    data_path .. "test_permute_segment_short.txt"
   )
   state_test = {data=test_sents}
   setup()
