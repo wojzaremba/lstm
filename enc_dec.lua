@@ -149,37 +149,6 @@ local function reset_ds()
 end
 
 local function _fp(state)
-  -- g_replace_table(model.s_enc[0], model.start_s_enc)
-  -- g_replace_table(model.s_dec[0], model.start_s_dec)
-
-  -- if state.pos + params.batch_size > #state.data then
-  --   reset_state(state)
-  -- end
-
-  -- local data_batch = torch.Tensor(state.data[state.pos])
-  -- for data_id = 1, params.batch_size-1 do
-  --   data_batch = torch.cat(
-  --     data_batch, torch.Tensor(state.data[state.pos + data_id]), 2
-  --   )
-  -- end
-  -- state.data_batch = transfer_data(data_batch)
-
-  -- for i = 1, params.max_seq_length do
-  --   local x = state.data_batch[i]
-  --   local y = state.data_batch[i]
-  --   local s_enc = model.s_enc[i - 1]
-  --   local s_dec = model.s_dec[i - 1]
-  --   model.embeddings[i], model.s_enc[i] = unpack(
-  --     model.rnns_enc[i]:forward({x, s_enc})
-  --   )
-  --   model.err[i], model.s_dec[i], model.preds[i] = unpack(
-  --     model.rnns_dec[i]:forward({model.embeddings[i], y, s_dec})
-  --   )
-  -- end
-  -- g_replace_table(model.start_s_enc, model.s_enc[params.max_seq_length])
-  -- g_replace_table(model.start_s_dec, model.s_dec[params.max_seq_length])
-
-  -- return model.err:mean()
   g_replace_table(model.s_enc[0], model.start_s_enc)
 
   if state.pos + params.batch_size > #state.data then
