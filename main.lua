@@ -1,3 +1,21 @@
+local cmd = torch.CmdLine()
+cmd:option('-gpuidx', 1, 'Index of GPU on which job should be executed.')
+cmd:option('-max_seq_length', 30, 'Maximum input sentence length.')
+cmd:option('-batch_size', 32, 'Training batch size.')
+cmd:option(
+  '-train', paths.concat('hdata', 'train_seg'),
+  'Training data folder path.'
+)
+cmd:option(
+  '-valid', paths.concat('hdata', "valid_permute_segment.txt"),
+  'Validation data path.'
+)
+cmd:option(
+  '-test', paths.concat('hdata', "test_permute_segment.txt"),
+  'Testing data path.'
+)
+local opt = cmd:parse(arg)
+
 local ok,cunn = pcall(require, 'fbcunn')
 if not ok then
     ok,cunn = pcall(require,'cunn')
@@ -39,8 +57,8 @@ local params = {batch_size=20,
 --]]
 -- Trains 1h and gives test 115 perplexity.
 -- [[
-local params = {batch_size=32,
-                max_seq_length=tonumber(arg[2]),
+local params = {batch_size=tonumber(opt.batch_size),
+                max_seq_length=tonumber(opt.max_seq_length),
                 layers=2,
                 decay=2,
                 rnn_size=1000,
@@ -54,7 +72,6 @@ local params = {batch_size=32,
 
 
 local stringx = require('pl.stringx')
-local data_path = "./hdata/"
 local EOS = params.vocab_size-1
 local NIL = params.vocab_size
 
@@ -287,18 +304,13 @@ local function _fp(state)
       model.s_dec[0][l][b]:copy(model.s_enc[eos_pos[b]][l][b])
     end
   end
-  local null = transfer_data(torch.zeros(params.batch_size, params.rnn_size))
-  model.err[1], model.s_dec[1] = unpack(
-    model.rnns_dec[1]:forward(
-      {null, state.data_batch[1], model.s_dec[0]}
-    )
-  )
 
-  for i = 2, params.max_seq_length do
+  for i = 1, params.max_seq_length do
     local y = state.data_batch[i]
     local s_dec = model.s_dec[i - 1]
+    local emb = s_dec[2*params.layers]
     model.err[i], model.s_dec[i] = unpack(
-      model.rnns_dec[i]:forward({model.embeddings[i-1], y, s_dec})
+      model.rnns_dec[i]:forward({emb, y, s_dec})
     )
   end
   g_replace_table(model.start_s_enc, model.s_enc[params.max_seq_length])
@@ -312,26 +324,38 @@ local function _bp(state)
   reset_ds()
 
   for i = params.max_seq_length, 1, -1 do
-    local x = state.data_batch[i]
     local y = state.data_batch[i]
     local s_dec = model.s_dec[i - 1]
-    local s_enc = model.s_enc[i - 1]
-    local embedding = model.embeddings[i]
-    local pred = transfer_data(torch.zeros(params.batch_size, params.vocab_size))
+    local embeddings = s_dec[2*params.layers]
+    local d_pred = transfer_data(
+      torch.zeros(params.batch_size, params.vocab_size)
+    )
     local derr = transfer_data(torch.ones(1))
 
-    local d_embedding, tmp_dec
-    d_embedding, _, tmp_dec = unpack(model.rnns_dec[i]:backward(
-      {embedding, y, s_dec},
-      {derr, model.ds_dec, pred}
-    ))
+    local tmp_dec
+    tmp_dec = model.rnns_dec[i]:backward(
+      {embeddings, y, s_dec},
+      {derr, model.ds_dec, d_pred}
+    )[3]
+
+    g_replace_table(model.ds_dec, tmp_dec)
+    cutorch.synchronize()
+  end
+
+  g_replace_table(model.ds_enc, model.ds_dec)
+
+  for i = params.max_seq_length, 1, -1 do
+    local x = state.data_batch[i]
+    local s_enc = model.s_enc[i - 1]
+    local d_embedding = transfer_data(
+      torch.zeros(params.batch_size, params.rnn_size)
+    )
     local tmp_enc = model.rnns_enc[i]:backward(
       {x, s_enc},
       {d_embedding, model.ds_enc}
     )[2]
 
     g_replace_table(model.ds_enc, tmp_enc)
-    g_replace_table(model.ds_dec, tmp_dec)
     cutorch.synchronize()
   end
 
@@ -381,17 +405,15 @@ local function run_test()
 end
 
 local function main()
-  g_init_gpu(arg)
+  g_init_gpu(opt.gpuidx)
 
   local filenames = {}
-  for filename in paths.iterfiles(data_path .. 'train_seg') do
+  for filename in paths.iterfiles(opt.train) do
     table.insert(filenames, filename)
   end
   local num_of_sents = 0
   for id, f in pairs(filenames) do
-    local sents = load_data_into_sents(
-      data_path .. "train_seg/" .. f
-    )
+    local sents = load_data_into_sents(paths.concat(opt.train, f))
     num_of_sents = num_of_sents + #sents
     collectgarbage()
   end
@@ -399,14 +421,10 @@ local function main()
   local epoch_size = torch.floor(num_of_sents / params.batch_size)
 
   local train_sents = load_data_into_sents(
-    data_path .. "train_seg/" .. filenames[1]
+    paths.concat(opt.train, filenames[1])
   )
-  local valid_sents = load_data_into_sents(
-    data_path .. "valid_permute_segment.txt"
-  )
-  local test_sents = load_data_into_sents(
-    data_path .. "test_permute_segment.txt"
-  )
+  local valid_sents = load_data_into_sents(opt.valid)
+  local test_sents = load_data_into_sents(opt.test)
   state_train = {data=train_sents}
   state_valid = {data=valid_sents}
   state_test = {data=test_sents}
@@ -474,7 +492,7 @@ local function main()
             ', current step: ' .. step)
 
       state_train.data = load_data_into_sents(
-        data_path .. "train_seg/" .. filenames[file_step]
+        paths.concat(opt.train, filenames[file_step])
       )
       state_train.pos = 1
       file_size = file_size + torch.floor(
