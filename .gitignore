@@ -6,3 +6,6 @@ preds*
 ref*
 training.*log
 embs*
+decs*
+size*
+

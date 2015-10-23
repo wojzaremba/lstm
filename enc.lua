@@ -1,3 +1,16 @@
+local cmd = torch.CmdLine()
+cmd:option('-gpuidx', 1, 'Index of GPU on which job should be executed.')
+cmd:option('-max_seq_length', 30, 'Maximum input sentence length.')
+cmd:option('-batch_size', 32, 'Training batch size.')
+cmd:option('-model', 'models/enc', 'Trained autoencoder path.')
+cmd:option(
+  '-input', paths.concat('hdata', 'train_seg'),
+  'Input data folder path.'
+)
+cmd:option('-embs', 'embs', 'Output embeddings path.')
+cmd:option('-size', 'size', 'Output docs\' size path.')
+opt = cmd:parse(arg)
+
 local ok,cunn = pcall(require, 'fbcunn')
 if not ok then
     ok,cunn = pcall(require,'cunn')
@@ -13,6 +26,7 @@ else
     cudaComputeCapability = deviceParams.major + deviceParams.minor/10
     LookupTable = nn.LookupTable
 end
+require('paths')
 require('nngraph')
 require('base')
 
@@ -38,8 +52,8 @@ local params = {batch_size=20,
 --]]
 -- Trains 1h and gives test 115 perplexity.
 -- [[
-local params = {batch_size=32,
-                max_seq_length=tonumber(arg[2]),
+local params = {batch_size=tonumber(opt.batch_size),
+                max_seq_length=tonumber(opt.max_seq_length),
                 layers=2,
                 decay=2,
                 rnn_size=1000,
@@ -53,10 +67,16 @@ local params = {batch_size=32,
 
 
 local stringx = require('pl.stringx')
-local data_path = "./hdata/"
+local EOS = params.vocab_size-1
+local NIL = params.vocab_size
 
-local function load_data_into_sents(fname)
+local SPACE = 32
+local NEW_LINE = 10
+
+function load_data_into_sents(fname)
   local sents = {}
+  local sizes = {}
+  local size = 0
 
   local file = torch.DiskFile(fname, 'r')
   file:quiet()
@@ -64,179 +84,173 @@ local function load_data_into_sents(fname)
     local sent = file:readString('*l')
     sent = string.gsub(sent, '%s*$', '')
     if #sent ~= 0 then
+      size = size + 1
       sent = stringx.split(sent)
-      -- if #sent < params.max_seq_length then
-        table.insert(sent, params.vocab_size-1)
-        table.insert(sents, sent)
-      -- end
+      table.insert(sent, EOS)
+      table.insert(sents, sent)
       for wid = #sent+1, params.max_seq_length do
-        sents[#sents][wid] = params.vocab_size
+        sents[#sents][wid] = NIL
       end
+    else
+      table.insert(sizes, size)
+      size = 0
     end
   until file:hasError()
 
-  return sents
+  return {sents, sizes}
 end
 
-local state_test
+local state_input
 local model = {}
-local paramx_enc, paramdx_enc, paramx_dec, paramdx_dec
-local embeddings = {}
--- local preds = {}
-local embs = {}
 
 local function setup()
   print("Loading RNN LSTM networks...")
-  local encoder = torch.load('./models/9.enc')
-  local decoder = torch.load('./models/9.dec')
-
-  paramx_enc, paramdx_enc = encoder:getParameters()
-  paramx_dec, paramdx_dec = decoder:getParameters()
+  local encoder = torch.load(opt.model)
 
   model.s_enc = {}
-  model.ds_enc = {}
   model.start_s_enc = {}
-  model.s_dec = {}
-  model.ds_dec = {}
-  model.start_s_dec = {}
-  model.embeddings = {}
-  model.preds = {}
 
   for j = 0, params.max_seq_length do
     model.s_enc[j] = {}
-    model.s_dec[j] = {}
     for d = 1, 2 * params.layers do
       model.s_enc[j][d] = transfer_data(torch.zeros(params.batch_size, params.rnn_size))
-      model.s_dec[j][d] = transfer_data(torch.zeros(params.batch_size, params.rnn_size))
     end
-
-    model.embeddings[j] = transfer_data(torch.zeros(params.batch_size, params.rnn_size))
   end
   for d = 1, 2 * params.layers do
     model.start_s_enc[d] = transfer_data(torch.zeros(params.batch_size, params.rnn_size))
-    model.ds_enc[d] = transfer_data(torch.zeros(params.batch_size, params.rnn_size))
-    model.start_s_dec[d] = transfer_data(torch.zeros(params.batch_size, params.rnn_size))
-    model.ds_dec[d] = transfer_data(torch.zeros(params.batch_size, params.rnn_size))
   end
 
   model.encoder = encoder
-  model.decoder = decoder
   model.rnns_enc = g_cloneManyTimes(encoder, params.max_seq_length)
-  model.rnns_dec = g_cloneManyTimes(decoder, params.max_seq_length)
-  model.norm_dw_enc = 0
-  model.norm_dw_dec = 0
-  model.err = transfer_data(torch.zeros(params.max_seq_length))
 end
 
 local function reset_state(state)
   state.pos = 1
   if model ~= nil
-    and model.start_s_enc ~= nil
-    and model.start_s_dec ~= nil then
+    and model.start_s_enc ~= nil then
     for d = 1, 2 * params.layers do
       model.start_s_enc[d]:zero()
-      model.start_s_dec[d]:zero()
     end
-  end
-end
-
-local function reset_ds()
-  for d = 1, #model.ds_enc do
-    model.ds_enc[d]:zero()
-    model.ds_dec[d]:zero()
   end
 end
 
 local function _fp(state)
   g_replace_table(model.s_enc[0], model.start_s_enc)
-  g_replace_table(model.s_dec[0], model.start_s_dec)
 
-  if state.pos + params.batch_size > #state.data then
-    reset_state(state)
-  end
+  -- if state.pos + params.batch_size > #state.data then
+  --   reset_state(state)
+  -- end
 
   local data_batch = torch.Tensor(state.data[state.pos])
-  if data_batch:size(1) > params.max_seq_length then
-    data_batch = data_batch[{{1, params.max_seq_length}}]
+  if data_batch:size()[1] > params.max_seq_length then
+    data_batch = data_batch[{{1,params.max_seq_length}}]
   end
   for data_id = 1, params.batch_size-1 do
-    local next_data = torch.Tensor(state.data[state.pos + data_id])
-    if next_data:size(1) > params.max_seq_length then
-      next_data = next_data[{{1, params.max_seq_length}}]
+    local new_data = state.data[state.pos + data_id]
+    if new_data == nil then
+      new_data = torch.zeros(params.max_seq_length)
+    else
+      new_data = torch.Tensor(new_data)
     end
-    data_batch = torch.cat(
-      data_batch, next_data, 2
-    )
+    if new_data:size()[1] > params.max_seq_length then
+      new_data = new_data[{{1,params.max_seq_length}}]
+    end
+    data_batch = torch.cat(data_batch, new_data, 2)
   end
   state.data_batch = transfer_data(data_batch)
 
+  local eos_pos = transfer_data(
+    torch.ones(params.batch_size):mul(params.max_seq_length)
+  )
   for i = 1, params.max_seq_length do
-    local x = state.data_batch[i]
-    local y = state.data_batch[i]
+    local x = data_batch[i]
     local s_enc = model.s_enc[i - 1]
-    local s_dec = model.s_dec[i - 1]
-    model.embeddings[i], model.s_enc[i] = unpack(
-      model.rnns_enc[i]:forward({x, s_enc})
-    )
-    model.err[i], model.s_dec[i], model.preds[i] = unpack(
-      model.rnns_dec[i]:forward({model.embeddings[i], y, s_dec})
-    )
-  end
-  g_replace_table(model.start_s_enc, model.s_enc[params.max_seq_length])
-  g_replace_table(model.start_s_dec, model.s_dec[params.max_seq_length])
+    model.s_enc[i] = model.rnns_enc[i]:forward({x, s_enc})[2]
 
-  return model.err:mean()
-end
-
-local function run_test()
-  reset_state(state_test)
-  g_disable_dropout(model.rnns_enc)
-  g_disable_dropout(model.rnns_dec)
-  local len = #state_test.data / params.batch_size
-  local perp = 0
-  local ans
-
-  for i = 0, len do
-    ans = nil
-    local p = _fp(state_test)
-
-    if i ~= 0 then
-      state_test.pos = state_test.pos + params.batch_size
-      perp = perp + p
-
-      local emb = model.embeddings[params.max_seq_length]
-      table.insert(embs, emb)
+    -- if some sentences reach <eos> at i-th word...
+    if eos_pos[x:eq(EOS)]:dim() == 1 then
+      eos_pos[x:eq(EOS)] = i
     end
   end
 
-  print("Test set perplexity : " .. g_f3(torch.exp(perp / (len-1) )))
-  g_enable_dropout(model.rnns_enc)
-  g_enable_dropout(model.rnns_dec)
+  local emb = {}
+  for d = 1, 2 * params.layers do
+    emb[d] = transfer_data(torch.zeros(params.batch_size, params.rnn_size))
+  end
+
+  for l = 1, 2*params.layers do
+    for b = 1, params.batch_size do
+      emb[l][b]:copy(model.s_enc[eos_pos[b]][l][b])
+    end
+  end
+
+  g_replace_table(model.start_s_enc, model.s_enc[params.max_seq_length])
+  return emb
+end
+
+function mk_clean_dir(dirname)
+  if paths.filep(dirname) or paths.dir(dirname) ~= nil then
+    paths.rmall(dirname, 'yes')
+  end
+  paths.mkdir(dirname)
 end
 
 local function main()
-  g_init_gpu(arg)
+  mk_clean_dir(opt.embs)
+  mk_clean_dir(opt.size)
 
-  local test_sents = load_data_into_sents(
-    data_path .. "test_permute_segment_short.txt"
-  )
-  state_test = {data=test_sents}
+  g_init_gpu(opt.gpuidx)
   setup()
-  print("Start testing.")
-  run_test()
-  print("Testing is over.")
 
-  local fout = torch.DiskFile("embs", "w"):noAutoSpacing()
-  for i = 1, #embs do
-    for b = 1, params.batch_size do
-      for s = 1, params.rnn_size do
-        fout:writeDouble(embs[i][b][s])
-        fout:writeChar(32)
+  print("Start encoding.")
+  for filename in paths.iterfiles(opt.input) do
+    print('Current file: ' .. filename)
+    local data, sizes = unpack(
+      load_data_into_sents(
+        paths.concat(opt.input, filename)
+      )
+    )
+    state_input = {data=data}
+    reset_state(state_input)
+
+    local len = torch.ceil(#state_input.data / params.batch_size)
+    if len == 0 then
+      print("  An empty file.")
+    else
+      local emb_out = torch.DiskFile(
+        paths.concat(opt.embs, filename), "w"
+      ):noAutoSpacing()
+      for i = 0, len do
+        local emb = _fp(state_input)
+
+        if i ~= 0 then
+          state_input.pos = state_input.pos + params.batch_size
+
+          for l = 1, 2*params.layers do
+            for b = 1, params.batch_size do
+              for r = 1, params.rnn_size do
+                emb_out:writeDouble(emb[l][b][r])
+                emb_out:writeChar(SPACE)
+              end
+              emb_out:writeChar(NEW_LINE)
+            end
+          end
+          emb_out:writeChar(NEW_LINE)
+        end
       end
-      fout:writeChar(10)
+
+      local size_out = torch.DiskFile(
+        paths.concat(opt.size, filename), "w"
+      ):noAutoSpacing()
+      for i = 1, #sizes do
+        size_out:writeInt(sizes[i])
+        size_out:writeChar(NEW_LINE)
+      end
     end
-    fout:writeChar(10)
+
+    collectgarbage()
   end
+  print("Encoding is over.")
 end
 
 main()
