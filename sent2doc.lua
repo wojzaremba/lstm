@@ -1,7 +1,8 @@
 local cmd = torch.CmdLine()
 cmd:option('-gpuidx', 1, 'Index of GPU on which job should be executed.')
 cmd:option('-max_seq_length', 30, 'Maximum input sentence length.')
-cmd:option('-batch_size', 32, 'Training batch size.')
+cmd:option('-max_doc_length', 20, 'Maximum input document length.')
+cmd:option('-batch_size', 32, 'Data batch size.')
 cmd:option(
   '-train', paths.concat('hdata', 'train_seg'),
   'Training data folder path.'
@@ -14,6 +15,7 @@ cmd:option(
   '-test', paths.concat('hdata', "test_permute_segment.txt"),
   'Testing data path.'
 )
+cmd:option('-encoder', 'models/sent_enc.net', 'Sentence encoder path.')
 local opt = cmd:parse(arg)
 
 local ok,cunn = pcall(require, 'fbcunn')
@@ -59,21 +61,22 @@ local params = {batch_size=20,
 -- [[
 local params = {batch_size=tonumber(opt.batch_size),
                 max_seq_length=tonumber(opt.max_seq_length),
+                max_doc_length=tonumber(opt.max_doc_length),
                 layers=2,
                 decay=2,
                 rnn_size=1000,
                 dropout=0.2,
                 init_weight=0.08,
                 lr=0.1,
-                -- vocab_size=25002,
+                vocab_size=25002,
                 max_epoch=4,
                 max_max_epoch=13,
                 max_grad_norm=5}
 
-local word_emb_size = 2*params.layers*32*params.rnn_size
+local word_emb_size = 2*params.layers*params.rnn_size
 local stringx = require('pl.stringx')
--- local EOS = params.vocab_size-1
--- local NIL = params.vocab_size
+local EOS = params.vocab_size-1
+local NIL = params.vocab_size
 
 local function load_data_into_docs(fname)
   local docs = {}
@@ -86,39 +89,18 @@ local function load_data_into_docs(fname)
     sent = string.gsub(sent, '%s*$', '')
     if #sent ~= 0 then
       sent = stringx.split(sent)
-      table.insert(sent, '<eos>')
+      table.insert(sent, EOS)
+      for wid = #sent+1, params.max_seq_length do
+        table.insert(sent, NIL)
+      end
       table.insert(doc, sent)
     else
-      table.insert(doc[#doc], '<eod>')
       table.insert(docs, doc)
       doc = {}
     end
   until file:hasError()
 
   return docs
-end
-
-local function load_data_into_sents(fname)
-  local sents = {}
-
-  local file = torch.DiskFile(fname, 'r')
-  file:quiet()
-  repeat
-    local sent = file:readString('*l')
-    sent = string.gsub(sent, '%s*$', '')
-    if #sent ~= 0 then
-      sent = stringx.split(sent)
-      if #sent < params.max_seq_length then
-        table.insert(sent, EOS)
-        table.insert(sents, sent)
-      end
-      for wid = #sent+1, params.max_seq_length do
-        sents[#sents][wid] = NIL
-      end
-    end
-  until file:hasError()
-
-  return sents
 end
 
 local state_train, state_valid, state_test
@@ -155,8 +137,9 @@ local function create_network()
   local x                = nn.Identity()()
   local y                = nn.Identity()()
   local prev_s_enc       = nn.Identity()()
-  local i                = {[0] = LookupTable(params.vocab_size,
-                                                    params.rnn_size)(x)}
+  local i_0              = nn.Linear(word_emb_size, params.rnn_size)(x)
+  -- local i                = {[0] = nn.Sigmoid()(i_0)}
+  local i                = {[0] = i_0}
   local next_s_enc       = {}
   local split_enc        = {prev_s_enc:split(2 * params.layers)}
   for layer_idx = 1, params.layers do
@@ -189,12 +172,14 @@ local function create_network()
     j[layer_idx] = next_h
   end
 
-  local h2y              = nn.Linear(params.rnn_size, params.vocab_size)
+  local h2y              = nn.Linear(params.rnn_size, word_emb_size)
   local dropped          = nn.Dropout(params.dropout)(j[params.layers])
-  local pred             = nn.LogSoftMax()(h2y(dropped))
-  local mask             = torch.ones(params.vocab_size)
-  mask[NIL] = 0
-  local err              = nn.ClassNLLCriterion(mask)({pred, y})
+  local pred             = h2y(dropped)
+  -- local pred             = nn.LogSoftMax()(h2y(dropped))
+  -- local mask             = torch.ones(params.vocab_size)
+  -- mask[NIL] = 0
+  -- local err              = nn.ClassNLLCriterion(mask)({pred, y})
+  local err              = nn.MSECriterion()({pred, y})
 
   local decoder = nn.gModule(
     {j_0, y, prev_s_dec},
@@ -211,9 +196,23 @@ end
 
 local function setup()
   print("Creating a RNN LSTM network.")
+  local sent_encoder = torch.load(opt.encoder)
   local encoder, decoder = unpack(create_network())
   paramx_enc, paramdx_enc = encoder:getParameters()
   paramx_dec, paramdx_dec = decoder:getParameters()
+
+  model.s_sent_enc = {}
+  model.start_s_sent_enc = {}
+
+  for j = 0, params.max_seq_length do
+    model.s_sent_enc[j] = {}
+    for d = 1, 2 * params.layers do
+      model.s_sent_enc[j][d] = transfer_data(torch.zeros(params.batch_size, params.rnn_size))
+    end
+  end
+  for d = 1, 2 * params.layers do
+    model.start_s_sent_enc[d] = transfer_data(torch.zeros(params.batch_size, params.rnn_size))
+  end
 
   model.s_enc = {}
   model.ds_enc = {}
@@ -221,17 +220,14 @@ local function setup()
   model.s_dec = {}
   model.ds_dec = {}
   model.start_s_dec = {}
-  model.embeddings = {}
 
-  for j = 0, params.max_seq_length do
+  for j = 0, params.max_doc_length do
     model.s_enc[j] = {}
     model.s_dec[j] = {}
     for d = 1, 2 * params.layers do
       model.s_enc[j][d] = transfer_data(torch.zeros(params.batch_size, params.rnn_size))
       model.s_dec[j][d] = transfer_data(torch.zeros(params.batch_size, params.rnn_size))
     end
-
-    model.embeddings[j] = transfer_data(torch.zeros(params.batch_size, params.rnn_size))
   end
   for d = 1, 2 * params.layers do
     model.start_s_enc[d] = transfer_data(torch.zeros(params.batch_size, params.rnn_size))
@@ -240,21 +236,25 @@ local function setup()
     model.ds_dec[d] = transfer_data(torch.zeros(params.batch_size, params.rnn_size))
   end
 
+  model.sent_encoder = sent_encoder
   model.encoder = encoder
   model.decoder = decoder
-  model.rnns_enc = g_cloneManyTimes(encoder, params.max_seq_length)
-  model.rnns_dec = g_cloneManyTimes(decoder, params.max_seq_length)
+  model.rnns_sent_enc = g_cloneManyTimes(sent_encoder, params.max_seq_length)
+  model.rnns_enc = g_cloneManyTimes(encoder, params.max_doc_length)
+  model.rnns_dec = g_cloneManyTimes(decoder, params.max_doc_length)
   model.norm_dw_enc = 0
   model.norm_dw_dec = 0
-  model.err = transfer_data(torch.zeros(params.max_seq_length))
+  model.err = transfer_data(torch.zeros(params.max_doc_length))
 end
 
 local function reset_state(state)
-  state.pos = 1
+  state.pos = 0
   if model ~= nil
+    and model.start_s_sent_enc ~= nil
     and model.start_s_enc ~= nil
     and model.start_s_dec ~= nil then
     for d = 1, 2 * params.layers do
+      model.start_s_sent_enc[d]:zero()
       model.start_s_enc[d]:zero()
       model.start_s_dec[d]:zero()
     end
@@ -268,6 +268,77 @@ local function reset_ds()
   end
 end
 
+local function get_embedding_batch(state)
+  g_replace_table(model.s_sent_enc[0], model.start_s_sent_enc)
+  local doc_batch = {}
+  local eod_pos = torch.ones(params.batch_size):mul(params.max_doc_length)
+
+  for b = 1, params.batch_size do
+    if #state.data[state.pos+b] < params.max_doc_length then
+      eod_pos[b] = #state.data[state.pos+b]+1
+    end
+  end
+
+  for s = 1, params.max_doc_length do
+    local sent_batch
+    for b = 1, params.batch_size do
+      local new_data = state.data[state.pos+b][s]
+      if new_data ~= nil then
+        new_data = torch.Tensor(new_data)
+      else
+        new_data = torch.zeros(params.max_seq_length)
+      end
+
+      if new_data:size()[1] > params.max_seq_length then
+        new_data = new_data[{{1,params.max_seq_length}}]
+      end
+
+      if sent_batch ~= nil then
+        sent_batch = torch.cat(sent_batch, new_data, 2)
+      else
+        sent_batch = new_data
+      end
+    end
+
+    sent_batch = transfer_data(sent_batch)
+    local eos_pos = transfer_data(
+      torch.ones(params.batch_size):mul(params.max_seq_length)
+    )
+
+    sent_batch = transfer_data(sent_batch)
+    for i = 1, params.max_seq_length do
+      local x = sent_batch[i]
+      local s_sent_enc = model.s_sent_enc[i - 1]
+      _, model.s_sent_enc[i] = unpack(
+        model.rnns_sent_enc[i]:forward({x, s_sent_enc})
+      )
+
+      -- if some sentences reach <eos> at i-th word...
+      if eos_pos[x:eq(EOS)]:dim() == 1 then
+        eos_pos[x:eq(EOS)] = i
+      end
+    end
+
+    local emb = transfer_data(torch.zeros(params.batch_size, word_emb_size))
+
+    for l = 1, 2*params.layers do
+      for b = 1, params.batch_size do
+        local start_id = (l-1)*params.rnn_size+1
+        local end_id   =  l   *params.rnn_size
+        emb[b][{{start_id, end_id}}]:copy(model.s_sent_enc[eos_pos[b]][l][b])
+        -- model.start_s_sent_enc[b]:copy()
+      end
+    end
+
+    table.insert(doc_batch, emb)
+    g_replace_table(
+      model.start_s_sent_enc, model.s_sent_enc[params.max_seq_length]
+    )
+  end
+
+  return {doc_batch, eod_pos}
+end
+
 local function _fp(state)
   g_replace_table(model.s_enc[0], model.start_s_enc)
 
@@ -275,37 +346,41 @@ local function _fp(state)
     reset_state(state)
   end
 
-  local data_batch = torch.Tensor(state.data[state.pos])
-  for data_id = 1, params.batch_size-1 do
-    data_batch = torch.cat(
-      data_batch, torch.Tensor(state.data[state.pos + data_id]), 2
-    )
-  end
-  state.data_batch = transfer_data(data_batch)
+  -- doc_len * batch_size * 4000
+  local data_batch, eod_pos = unpack(get_embedding_batch(state))
 
-  local eos_pos = transfer_data(
-    torch.ones(params.batch_size):mul(params.max_seq_length)
-  )
-  for i = 1, params.max_seq_length do
+  -- local data_batch = torch.Tensor(state.data[state.pos])
+  -- for data_id = 1, params.batch_size-1 do
+  --   data_batch = torch.cat(
+  --     data_batch, torch.Tensor(state.data[state.pos + data_id]), 2
+  --   )
+  -- end
+  state.data_batch = data_batch
+
+  -- local eos_pos = transfer_data(
+  --   torch.ones(params.doc_batch_size):mul(params.max_doc_length)
+  -- )
+  for i = 1, params.max_doc_length do
     local x = state.data_batch[i]
     local s_enc = model.s_enc[i - 1]
-    model.embeddings[i], model.s_enc[i] = unpack(
+    _, model.s_enc[i] = unpack(
       model.rnns_enc[i]:forward({x, s_enc})
     )
 
     -- if some sentences reach <eos> at i-th word...
-    if eos_pos[x:eq(EOS)]:dim() == 1 then
-      eos_pos[x:eq(EOS)] = i
-    end
+    -- if eos_pos[x:eq(EOS)]:dim() == 1 then
+    --   eos_pos[x:eq(EOS)] = i
+    -- end
   end
 
   for l = 1, 2*params.layers do
     for b = 1, params.batch_size do
-      model.s_dec[0][l][b]:copy(model.s_enc[eos_pos[b]][l][b])
+      model.s_dec[0][l][b]:copy(model.s_enc[eod_pos[b]][l][b])
+      model.start_s_enc[l][b]:copy(model.s_enc[eod_pos[b]][l][b])
     end
   end
 
-  for i = 1, params.max_seq_length do
+  for i = 1, params.max_doc_length do
     local y = state.data_batch[i]
     local s_dec = model.s_dec[i - 1]
     local emb = s_dec[2*params.layers]
@@ -313,7 +388,7 @@ local function _fp(state)
       model.rnns_dec[i]:forward({emb, y, s_dec})
     )
   end
-  g_replace_table(model.start_s_enc, model.s_enc[params.max_seq_length])
+  -- g_replace_table(model.start_s_enc, model.s_enc[params.max_doc_length])
 
   return model.err:mean()
 end
@@ -323,17 +398,16 @@ local function _bp(state)
   paramdx_dec:zero()
   reset_ds()
 
-  for i = params.max_seq_length, 1, -1 do
+  for i = params.max_doc_length, 1, -1 do
     local y = state.data_batch[i]
     local s_dec = model.s_dec[i - 1]
     local embeddings = s_dec[2*params.layers]
     local d_pred = transfer_data(
-      torch.zeros(params.batch_size, params.vocab_size)
+      torch.zeros(params.batch_size, word_emb_size)
     )
     local derr = transfer_data(torch.ones(1))
 
-    local tmp_dec
-    tmp_dec = model.rnns_dec[i]:backward(
+    local tmp_dec = model.rnns_dec[i]:backward(
       {embeddings, y, s_dec},
       {derr, model.ds_dec, d_pred}
     )[3]
@@ -344,7 +418,7 @@ local function _bp(state)
 
   g_replace_table(model.ds_enc, model.ds_dec)
 
-  for i = params.max_seq_length, 1, -1 do
+  for i = params.max_doc_length, 1, -1 do
     local x = state.data_batch[i]
     local s_enc = model.s_enc[i - 1]
     local d_embedding = transfer_data(
@@ -379,12 +453,12 @@ local function run_valid()
   g_disable_dropout(model.rnns_enc)
   g_disable_dropout(model.rnns_dec)
   local len = #state_valid.data / params.batch_size
-  local perp = 0
+  local err = 0
   for i = 1, len do
-    perp = perp + _fp(state_valid)
+    err = err + _fp(state_valid)
     state_valid.pos = state_valid.pos + params.batch_size
   end
-  print("Validation set perplexity : " .. g_f3(torch.exp(perp / len)))
+  print("Validation set error : " .. g_f3(torch.exp(err / len)))
   g_enable_dropout(model.rnns_enc)
   g_enable_dropout(model.rnns_dec)
 end
@@ -394,12 +468,12 @@ local function run_test()
   g_disable_dropout(model.rnns_enc)
   g_disable_dropout(model.rnns_dec)
   local len = #state_test.data / params.batch_size
-  local perp = 0
+  local err = 0
   for i = 1, len do
-    perp = perp + _fp(state_test)
+    err = err + _fp(state_test)
     state_test.pos = state_test.pos + params.batch_size
   end
-  print("Test set perplexity : " .. g_f3(torch.exp(perp / len)))
+  print("Test set error : " .. g_f3(torch.exp(err / len)))
   g_enable_dropout(model.rnns_enc)
   g_enable_dropout(model.rnns_dec)
 end
@@ -411,23 +485,23 @@ local function main()
   for filename in paths.iterfiles(opt.train) do
     table.insert(filenames, filename)
   end
-  local num_of_sents = 0
+  local num_of_docs = 0
   for id, f in pairs(filenames) do
-    local sents = load_data_into_sents(paths.concat(opt.train, f))
-    num_of_sents = num_of_sents + #sents
+    local docs = load_data_into_docs(paths.concat(opt.train, f))
+    num_of_docs = num_of_docs + #docs
     collectgarbage()
   end
   collectgarbage()
-  local epoch_size = torch.floor(num_of_sents / params.batch_size)
+  local epoch_size = torch.floor(num_of_docs / params.batch_size)
 
-  local train_sents = load_data_into_sents(
+  local train_docs = load_data_into_docs(
     paths.concat(opt.train, filenames[1])
   )
-  local valid_sents = load_data_into_sents(opt.valid)
-  local test_sents = load_data_into_sents(opt.test)
-  state_train = {data=train_sents}
-  state_valid = {data=valid_sents}
-  state_test = {data=test_sents}
+  local valid_docs = load_data_into_docs(opt.valid)
+  local test_docs = load_data_into_docs(opt.test)
+  state_train = {data=train_docs}
+  state_valid = {data=valid_docs}
+  state_test = {data=test_docs}
   setup()
   reset_state(state_train)
 
@@ -438,25 +512,25 @@ local function main()
   local start_time = torch.tic()
   print("Starting training.")
 
-  local perps
+  local errs
   local file_step = 1
   local file_size = torch.floor(#state_train.data / params.batch_size)
   while epoch < params.max_max_epoch do
-    local perp = _fp(state_train)
-    if perps == nil then
-      perps = torch.zeros(epoch_size):add(perp)
+    local err = _fp(state_train)
+    if errs == nil then
+      errs = torch.zeros(epoch_size):add(err)
     end
-    perps[step % epoch_size + 1] = perp
+    errs[step % epoch_size + 1] = err
     step = step + 1
     _bp(state_train)
 
-    total_cases = total_cases + params.max_seq_length * params.batch_size
+    total_cases = total_cases + params.max_doc_length * params.batch_size
     epoch = step / epoch_size
     if step % torch.round(epoch_size / 10) == 10 then
       local wps = torch.floor(total_cases / torch.toc(start_time))
       local since_beginning = g_d(torch.toc(beginning_time) / 60)
       print('epoch = ' .. g_f3(epoch) ..
-            ', train perp. = ' .. g_f3(torch.exp(perps:mean())) ..
+            ', train err. = ' .. g_f3(torch.exp(errs:mean())) ..
             ', wps = ' .. wps ..
             ', encoder dw:norm() = ' .. g_f3(model.norm_dw_enc) ..
             ', decoder dw:norm() = ' .. g_f3(model.norm_dw_dec) ..
@@ -487,11 +561,13 @@ local function main()
         file_step = 1
       end
 
+      local since_beginning = g_d(torch.toc(beginning_time) / 60)
       print('Current file: ' .. filenames[file_step] ..
             ', file no. ' .. file_step ..
-            ', current step: ' .. step)
+            ', current step: ' .. step ..
+            ', since beginning = ' .. since_beginning .. ' mins.')
 
-      state_train.data = load_data_into_sents(
+      state_train.data = load_data_into_docs(
         paths.concat(opt.train, filenames[file_step])
       )
       state_train.pos = 1
