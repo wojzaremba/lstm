@@ -3,7 +3,7 @@
 --  All rights reserved.
 --
 --  This source code is licensed under the Apache 2 license found in the
---  LICENSE file in the root directory of this source tree. 
+--  LICENSE file in the root directory of this source tree.
 --
 
 function g_disable_dropout(node)
@@ -53,9 +53,7 @@ function g_cloneManyTimes(net, T)
   return clones
 end
 
-function g_init_gpu(args)
-  local gpuidx = args
-  gpuidx = gpuidx[1] or 1
+function g_init_gpu(gpuidx)
   print(string.format("Using %s-th gpu", gpuidx))
   cutorch.setDevice(gpuidx)
   g_make_deterministic(1)
