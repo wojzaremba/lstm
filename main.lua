@@ -5,6 +5,8 @@
 ----  This source code is licensed under the Apache 2 license found in the
 ----  LICENSE file in the root directory of this source tree. 
 ----
+-- global variable to dictate whether CPU or GPU should be used, accessed via g_use_cpu()
+use_cpu=false
 local ok,cunn = pcall(require, 'fbcunn')
 if not ok then
     ok,cunn = pcall(require,'cunn')
@@ -12,8 +14,15 @@ if not ok then
         print("warning: fbcunn not found. Falling back to cunn") 
         LookupTable = nn.LookupTable
     else
-        print("Could not find cunn or fbcunn. Either is required")
-        os.exit()
+        print("Could not find cunn or fbcunn. Falling back to CPU")
+        local ok,nn = pcall(require, 'nn')
+        if not ok then
+          print("Could not find nn. Cannot continue, exiting")
+          os.exit(1)
+        else
+          use_cpu=true
+          LookupTable = nn.LookupTable
+        end
     end
 else
     deviceParams = cutorch.getDeviceProperties(1)
@@ -55,7 +64,11 @@ local params = {batch_size=20,
                 max_grad_norm=5}
 
 local function transfer_data(x)
-  return x:cuda()
+  if (g_use_cpu()) then
+    return x
+  else 
+    return x:cuda()
+  end
 end
 
 local state_train, state_valid, state_test
@@ -181,7 +194,10 @@ local function bp(state)
     local tmp = model.rnns[i]:backward({x, y, s},
                                        {derr, model.ds})[3]
     g_replace_table(model.ds, tmp)
-    cutorch.synchronize()
+    if (g_use_cpu()) then
+    else
+      cutorch.synchronize()
+    end
   end
   state.pos = state.pos + params.seq_length
   model.norm_dw = paramdx:norm()
@@ -222,7 +238,11 @@ local function run_test()
 end
 
 local function main()
-  g_init_gpu(arg)
+  if (g_use_cpu()) then
+    -- do nothing, we're running on the CPU
+  else
+    g_init_gpu(arg)
+  end
   state_train = {data=transfer_data(ptb.traindataset(params.batch_size))}
   state_valid =  {data=transfer_data(ptb.validdataset(params.batch_size))}
   state_test =  {data=transfer_data(ptb.testdataset(params.batch_size))}
@@ -269,7 +289,10 @@ local function main()
       end
     end
     if step % 33 == 0 then
-      cutorch.synchronize()
+      if (g_use_cpu()) then
+      else
+        cutorch.synchronize()
+      end
       collectgarbage()
     end
   end
